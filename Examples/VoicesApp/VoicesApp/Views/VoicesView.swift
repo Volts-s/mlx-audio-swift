@@ -8,7 +8,6 @@ struct VoicesView: View {
 
     @Binding var recentlyUsed: [Voice]
     @Binding var customVoices: [Voice]
-    let collections: [VoiceCollection]
     var onVoiceSelected: ((Voice) -> Void)?
 
     var filteredRecentlyUsed: [Voice] {
@@ -55,12 +54,6 @@ struct VoicesView: View {
                             }
                         )
                         .padding(.horizontal)
-                    }
-
-                    // Voice collections
-                    if searchText.isEmpty {
-                        CollectionsSection(collections: collections)
-                            .padding(.horizontal)
                     }
 
                     // Your voices section
@@ -233,7 +226,6 @@ struct YourVoicesSection: View {
 #Preview {
     VoicesView(
         recentlyUsed: .constant(Voice.samples),
-        customVoices: .constant(Voice.customVoices),
-        collections: VoiceCollection.samples
+        customVoices: .constant(Voice.customVoices)
     )
 }

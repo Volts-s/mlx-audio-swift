@@ -130,8 +130,7 @@ struct ContentView: View {
         .sheet(isPresented: $showVoices) {
             VoicesView(
                 recentlyUsed: $recentlyUsed,
-                customVoices: $customVoices,
-                collections: VoiceCollection.samples
+                customVoices: $customVoices
             ) { voice in
                 selectedVoice = voice
                 showVoices = false
