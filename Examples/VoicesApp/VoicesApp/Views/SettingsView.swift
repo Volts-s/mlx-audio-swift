@@ -140,6 +140,53 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.bottom, 16)
+
+            // Text Chunking Section
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Text Chunking")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Enable chunking for long text", isOn: $viewModel.enableChunking)
+                    .padding(.top, 8)
+
+                if viewModel.enableChunking {
+                    HStack {
+                        Text("Max chunk length")
+                        Spacer()
+                        Text("\(viewModel.maxChunkLength)")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 8)
+
+                    Slider(
+                        value: Binding(
+                            get: { Double(viewModel.maxChunkLength) },
+                            set: { viewModel.maxChunkLength = Int($0) }
+                        ),
+                        in: 100...500,
+                        step: 50
+                    )
+                    .tint(.blue)
+
+                    HStack {
+                        Text("Split pattern")
+                        Spacer()
+                    }
+                    .padding(.top, 8)
+
+                    TextField("Pattern (regex)", text: $viewModel.splitPattern)
+                        .textFieldStyle(.plain)
+                        .padding(10)
+                        .background(Color.gray.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    Text("Split on this pattern first, then by sentences. Examples: \\n (newline), [.!?]\\s+ (sentences)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             Spacer()
 
@@ -150,6 +197,9 @@ struct SettingsView: View {
                     viewModel.maxTokens = 1200
                     viewModel.temperature = 0.6
                     viewModel.topP = 0.8
+                    viewModel.enableChunking = true
+                    viewModel.maxChunkLength = 300
+                    viewModel.splitPattern = "\n"
                 }) {
                     Text("Reset to Defaults")
                         .font(.subheadline)
@@ -179,7 +229,7 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding(.horizontal, 24)
-        .frame(minWidth: 450, minHeight: 580)
+        .frame(minWidth: 450, minHeight: 700)
     }
 }
 

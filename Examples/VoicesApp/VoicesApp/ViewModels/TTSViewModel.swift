@@ -21,6 +21,11 @@ class TTSViewModel {
     var temperature: Float = 0.6
     var topP: Float = 0.8
 
+    // Text chunking
+    var enableChunking: Bool = true
+    var maxChunkLength: Int = 200
+    var splitPattern: String = "\n"  // Can be regex like "\\n" or "[.!?]\\s+"
+
     // Model configuration
     var modelId: String = "mlx-community/VyvoTTS-EN-Beta-4bit"
     private var loadedModelId: String?
@@ -94,6 +99,84 @@ class TTSViewModel {
         await loadModel()
     }
 
+    /// Split text into chunks based on pattern and max length
+    private func chunkText(_ text: String) -> [String] {
+        guard enableChunking && text.count > maxChunkLength else {
+            return [text]
+        }
+
+        // First split by pattern (supports regex)
+        var segments: [String]
+        if let regex = try? NSRegularExpression(pattern: splitPattern, options: []) {
+            let range = NSRange(text.startIndex..., in: text)
+            segments = regex.stringByReplacingMatches(in: text, range: range, withTemplate: "\u{0000}")
+                .components(separatedBy: "\u{0000}")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        } else {
+            // Fallback to simple string split
+            segments = text.components(separatedBy: splitPattern)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+
+        // Group segments into chunks respecting max length
+        var chunks: [String] = []
+        var currentChunk = ""
+
+        for segment in segments {
+            if currentChunk.isEmpty {
+                currentChunk = segment
+            } else if currentChunk.count + segment.count + 1 <= maxChunkLength {
+                currentChunk += " " + segment
+            } else {
+                chunks.append(currentChunk)
+                currentChunk = segment
+            }
+        }
+
+        if !currentChunk.isEmpty {
+            chunks.append(currentChunk)
+        }
+
+        // Handle case where a single segment is too long - split by sentence boundaries
+        var finalChunks: [String] = []
+        for chunk in chunks {
+            if chunk.count > maxChunkLength {
+                // Try splitting by sentence boundaries
+                let sentencePattern = "[.!?]+\\s*"
+                if let sentenceRegex = try? NSRegularExpression(pattern: sentencePattern, options: []) {
+                    let range = NSRange(chunk.startIndex..., in: chunk)
+                    let sentences = sentenceRegex.stringByReplacingMatches(in: chunk, range: range, withTemplate: "$0\u{0000}")
+                        .components(separatedBy: "\u{0000}")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+
+                    var subChunk = ""
+                    for sentence in sentences {
+                        if subChunk.isEmpty {
+                            subChunk = sentence
+                        } else if subChunk.count + sentence.count + 1 <= maxChunkLength {
+                            subChunk += " " + sentence
+                        } else {
+                            finalChunks.append(subChunk)
+                            subChunk = sentence
+                        }
+                    }
+                    if !subChunk.isEmpty {
+                        finalChunks.append(subChunk)
+                    }
+                } else {
+                    finalChunks.append(chunk)
+                }
+            } else {
+                finalChunks.append(chunk)
+            }
+        }
+
+        return finalChunks.isEmpty ? [text] : finalChunks
+    }
+
     func synthesize(text: String, voice: Voice? = nil) async {
         guard let model = model else {
             errorMessage = "Model not loaded"
@@ -111,35 +194,76 @@ class TTSViewModel {
         tokensPerSecond = 0
 
         do {
-            var tokenCount = 0
-            var audio: MLXArray?
+            // Split text into chunks
+            let chunks = chunkText(text)
+            var audioSamples: [Float] = []  // Store on CPU to avoid GPU memory buildup
+            var totalTokenCount = 0
 
-            for try await event in model.generateStream(
-                text: text,
-                voice: voice?.name,
-                parameters: .init(
-                    maxTokens: maxTokens,
-                    temperature: temperature,
-                    topP: topP,
-                    repetitionPenalty: 1.3,
-                    repetitionContextSize: 20
-                )
-            ) {
-                switch event {
-                case .token:
-                    tokenCount += 1
-                    if tokenCount % 10 == 0 {
-                        generationProgress = "Generated \(tokenCount) tokens..."
-                    }
-                case .info(let info):
-                    tokensPerSecond = info.tokensPerSecond
-                    generationProgress = "Processing audio..."
-                case .audio(let audioData):
-                    audio = audioData
+            for (index, chunk) in chunks.enumerated() {
+                if chunks.count > 1 {
+                    generationProgress = "Processing chunk \(index + 1)/\(chunks.count)..."
                 }
+
+                var chunkTokenCount = 0
+                var audio: MLXArray?
+
+                // Set aggressive cache limit to reduce peak memory during generation
+                Memory.cacheLimit = 1024 * 1024 * 1024  // 1GB cache limit
+
+                print("GPU memory before generation - Active: \(Double(Memory.activeMemory)/1e9) GB")
+
+                // Each chunk needs a fresh cache - don't reuse across chunks
+                for try await event in model.generateStream(
+                    text: chunk,
+                    voice: voice?.name,
+                    cache: nil,
+                    parameters: .init(
+                        maxTokens: maxTokens,
+                        temperature: temperature,
+                        topP: topP,
+                        repetitionPenalty: 1.3,
+                        repetitionContextSize: 20
+                    )
+                ) {
+                    switch event {
+                    case .token:
+                        chunkTokenCount += 1
+                        totalTokenCount += 1
+                        if chunkTokenCount % 10 == 0 {
+                            if chunks.count > 1 {
+                                generationProgress = "Chunk \(index + 1)/\(chunks.count): \(chunkTokenCount) tokens..."
+                            } else {
+                                generationProgress = "Generated \(chunkTokenCount) tokens..."
+                            }
+                        }
+                    case .info(let info):
+                        tokensPerSecond = info.tokensPerSecond
+                    case .audio(let audioData):
+                        audio = audioData
+                    }
+                }
+
+                // Convert to CPU samples immediately to free GPU memory
+                if let audioData = audio {
+                    // Add silence between chunks (not before the first chunk)
+                    if !audioSamples.isEmpty {
+                        let silenceDuration = 0.3  // 300ms of silence between chunks
+                        let silenceSamples = Int(Double(model.sampleRate) * silenceDuration)
+                        audioSamples.append(contentsOf: [Float](repeating: 0.0, count: silenceSamples))
+                    }
+
+                    let samples = audioData.asArray(Float.self)
+                    audioSamples.append(contentsOf: samples)
+                }
+                audio = nil
+
+                // Clear GPU cache after each chunk
+                Memory.clearCache()
+                print("GPU memory after generation - Active: \(Double(Memory.activeMemory)/1e9) GB, Peak: \(Double(Memory.peakMemory)/1e9) GB")
+
             }
 
-            guard let audioData = audio else {
+            guard !audioSamples.isEmpty else {
                 throw NSError(
                     domain: "TTSViewModel",
                     code: 1,
@@ -147,12 +271,16 @@ class TTSViewModel {
                 )
             }
 
-            // Save audio to temp file
+            // Save audio directly from CPU samples (avoids GPU memory allocation)
+            generationProgress = "Saving audio..."
+
             let tempURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("wav")
 
-            try saveAudioArray(audioData, sampleRate: Double(model.sampleRate), to: tempURL)
+            try saveAudioSamples(audioSamples, sampleRate: Double(model.sampleRate), to: tempURL)
+            Memory.clearCache()
+
 
             audioURL = tempURL
             generationProgress = ""  // Clear progress
@@ -164,8 +292,6 @@ class TTSViewModel {
             errorMessage = "Generation failed: \(error.localizedDescription)"
             generationProgress = ""
         }
-        
-        Memory.clearCache()
 
         isGenerating = false
     }
