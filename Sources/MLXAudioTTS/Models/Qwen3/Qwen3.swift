@@ -818,7 +818,17 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
     }
 
     public static func fromPretrained(_ modelRepo: String) async throws -> Qwen3Model {
-        let client = HubClient.default
+        // Check for HF token in environment (macOS) or Info.plist (iOS)
+        let hfToken: String? = ProcessInfo.processInfo.environment["HF_TOKEN"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "HF_TOKEN") as? String
+
+        let client: HubClient
+        if let token = hfToken, !token.isEmpty {
+            print("Using HuggingFace token from configuration")
+            client = HubClient(host: HubClient.defaultHost, bearerToken: token)
+        } else {
+            client = HubClient.default
+        }
         let cache = client.cache ?? HubCache.default
 
         guard let repoID = Repo.ID(rawValue: modelRepo) else {
@@ -916,8 +926,18 @@ func resolveOrDownloadModel(
         let hasRequiredFiles = files?.contains { $0.pathExtension == requiredExtension } ?? false
 
         if hasRequiredFiles {
-            print("Using cached model at: \(modelDir.path)")
-            return modelDir
+            // Validate that config.json is valid JSON
+            let configPath = modelDir.appendingPathComponent("config.json")
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                if let configData = try? Data(contentsOf: configPath),
+                   let _ = try? JSONSerialization.jsonObject(with: configData) {
+                    print("Using cached model at: \(modelDir.path)")
+                    return modelDir
+                } else {
+                    print("Cached config.json is invalid, clearing cache...")
+                    try? FileManager.default.removeItem(at: modelDir)
+                }
+            }
         }
     }
 
