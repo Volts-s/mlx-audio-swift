@@ -65,6 +65,73 @@ public func loadAudioArray(from url: URL) throws -> (Double, MLXArray) {
 public enum WAVWriterError: Error {
     case noFrames
     case bufferAllocFailed
+    case fileNotOpen
+}
+
+/// Streaming WAV writer that writes audio chunks directly to file
+public class StreamingWAVWriter {
+    private var audioFile: AVAudioFile?
+    private let format: AVAudioFormat
+    private let url: URL
+    private var totalFramesWritten: Int = 0
+
+    public init(url: URL, sampleRate: Double, channels: Int = 1) throws {
+        self.url = url
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(channels),
+            interleaved: false
+        ) else {
+            throw NSError(domain: "StreamingWAVWriter", code: -1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to create audio format"])
+        }
+        self.format = format
+        self.audioFile = try AVAudioFile(forWriting: url, settings: format.settings)
+    }
+
+    /// Write a chunk of audio samples to the file
+    public func writeChunk(_ samples: [Float]) throws {
+        guard let file = audioFile else {
+            throw WAVWriterError.fileNotOpen
+        }
+
+        let frames = samples.count
+        guard frames > 0 else { return }
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
+            throw WAVWriterError.bufferAllocFailed
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+
+        guard let dst = buffer.floatChannelData else {
+            throw WAVWriterError.bufferAllocFailed
+        }
+
+        samples.withUnsafeBufferPointer { src in
+            guard let baseAddress = src.baseAddress else { return }
+            dst[0].update(from: baseAddress, count: frames)
+        }
+
+        try file.write(from: buffer)
+        totalFramesWritten += frames
+    }
+
+    /// Close the file and return the URL
+    public func finalize() -> URL {
+        audioFile = nil  // Closes the file
+        return url
+    }
+
+    /// Get total frames written so far
+    public var framesWritten: Int {
+        return totalFramesWritten
+    }
+
+    /// Get duration in seconds
+    public var duration: Double {
+        return Double(totalFramesWritten) / format.sampleRate
+    }
 }
 
 public func saveAudioArray(_ audio: MLXArray, sampleRate: Double, to url: URL) throws {
