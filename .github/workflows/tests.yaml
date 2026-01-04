@@ -1,7 +1,7 @@
 # This workflow will build a Swift project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
 
-name: Run Swift Tests
+name: Run Tests
 
 on:
   pull_request:
@@ -21,8 +21,10 @@ jobs:
       - name: Install Metal toolchain
         run: xcodebuild -downloadComponent MetalToolchain
       - name: Clean build folder
-        run: xcodebuild clean -scheme MLXAudio
-      - name: Build and Run tests
-        run: xcodebuild test -scheme MLXAudio -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
-      - name: Build Swift Package
-        run: swift build
+        run: xcodebuild clean -scheme MLXAudio-Package -destination 'platform=macOS'
+      - name: Build
+        run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
+      - name: Test Codecs
+        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioCodecsTests CODE_SIGNING_ALLOWED=NO
+      - name: Test TTS
+        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioTTSTests CODE_SIGNING_ALLOWED=NO
