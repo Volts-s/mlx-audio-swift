@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import MLX
 
-class AudioUtils {
+public class AudioUtils {
   enum AudioUtilsErrors: Error {
     case cannotCreateAVAudioFormat
   }
