@@ -194,6 +194,49 @@ struct STTSettingsView: View {
             }
             .padding(.bottom, sectionSpacing)
 
+            // Streaming Delay Section
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Live Streaming")
+                    .font(labelFont)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Confirmation Delay")
+                        .font(textFont)
+                    Spacer()
+                    Text(delayLabel(viewModel.streamingDelayMs))
+                        .font(textFont)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
+
+                #if os(iOS)
+                CompactSlider(
+                    value: Binding(
+                        get: { Double(viewModel.streamingDelayMs) },
+                        set: { viewModel.streamingDelayMs = Int($0) }
+                    ),
+                    range: 0...5000,
+                    step: 100
+                )
+                #else
+                Slider(
+                    value: Binding(
+                        get: { Double(viewModel.streamingDelayMs) },
+                        set: { viewModel.streamingDelayMs = Int($0) }
+                    ),
+                    in: 0...5000,
+                    step: 100
+                )
+                .tint(.blue)
+                #endif
+
+                Text("How long tokens must be stable before confirming. Lower = faster but more corrections.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.bottom, sectionSpacing)
+
             // Language Section
             VStack(alignment: .leading, spacing: 2) {
                 Text("Language")
@@ -217,10 +260,11 @@ struct STTSettingsView: View {
             // Reset button
             Button(action: {
                 viewModel.modelId = "mlx-community/Qwen3-ASR-0.6B-4bit"
-                viewModel.maxTokens = 8192
+                viewModel.maxTokens = 1024
                 viewModel.temperature = 0.0
                 viewModel.language = "English"
-                viewModel.chunkDuration = 250.0
+                viewModel.chunkDuration = 30.0
+                viewModel.streamingDelayMs = 480
             }) {
                 Text("Reset to Defaults")
                     .font(textFont)
@@ -236,6 +280,16 @@ struct STTSettingsView: View {
             .padding(.bottom, 12)
         }
         .padding(.horizontal, horizontalPadding)
+    }
+}
+
+private func delayLabel(_ ms: Int) -> String {
+    switch ms {
+    case 0: return "0ms (instant)"
+    case 200: return "200ms (realtime)"
+    case 480: return "480ms (agent)"
+    case 2400: return "2400ms (subtitle)"
+    default: return "\(ms)ms"
     }
 }
 

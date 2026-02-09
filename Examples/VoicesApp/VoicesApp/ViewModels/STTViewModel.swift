@@ -23,6 +23,9 @@ class STTViewModel {
     var language: String = "English"
     var chunkDuration: Float = 30.0
 
+    // Streaming parameters
+    var streamingDelayMs: Int = 480  // .agent default
+
     // Model configuration
     var modelId: String = "mlx-community/Qwen3-ASR-0.6B-4bit"
     private var loadedModelId: String?
@@ -183,38 +186,24 @@ class STTViewModel {
         isGenerating = false
     }
 
-    // MARK: - Live Recording & Transcription
-    //
-    // Dual-chunk system:
-    //  - Fast chunks (~2s): quick transcription for immediate feedback → pendingText
-    //  - Correction chunks (~10s): re-transcribe full pending window → replaces pendingText, promotes to confirmedText
-    //  - Display = confirmedText + pendingText
-
-    private let fastInterval: Double = 2.0
-    private let correctionInterval: Double = 10.0
-    private let sampleRate = 16000
+    // MARK: - Live Recording & Streaming Transcription
 
     private var liveTask: Task<Void, Never>?
-    private var correctionTask: Task<Void, Never>?
-
-    /// Text confirmed by correction chunks (high quality)
-    private var confirmedText: String = ""
-    /// Text from fast chunks (may have errors, will be replaced by correction)
-    private var pendingText: String = ""
-    /// Sample position where confirmedText ends
-    private var confirmedSampleEnd: Int = 0
-    /// Sample position where last fast chunk ended
-    private var fastChunkEnd: Int = 0
+    private var eventTask: Task<Void, Never>?
+    private var streamingSession: StreamingInferenceSession?
+    private var lastReadPos: Int = 0
 
     func startRecording() {
+        guard let model = model else {
+            errorMessage = "Model not loaded"
+            return
+        }
+
         errorMessage = nil
         transcriptionText = ""
-        confirmedText = ""
-        pendingText = ""
-        confirmedSampleEnd = 0
-        fastChunkEnd = 0
         tokensPerSecond = 0
         peakMemory = 0
+        lastReadPos = 0
 
         do {
             try recorder.startRecording()
@@ -223,200 +212,97 @@ class STTViewModel {
             return
         }
 
-        liveTask = Task {
-            await liveTranscriptionLoop()
-        }
-    }
+        // Create streaming session
+        let config = StreamingConfig(
+            decodeIntervalSeconds: 1.0,
+            maxCachedWindows: 60,
+            delayPreset: .custom(ms: streamingDelayMs),
+            language: language,
+            temperature: temperature,
+            maxTokensPerPass: maxTokens
+        )
+        let session = StreamingInferenceSession(model: model, config: config)
+        streamingSession = session
 
-    private func liveTranscriptionLoop() async {
-        var timeSinceCorrection: Double = 0
-
-        while !Task.isCancelled && recorder.isRecording {
-            try? await Task.sleep(for: .seconds(fastInterval))
-            guard !Task.isCancelled && recorder.isRecording else { break }
-            timeSinceCorrection += fastInterval
-
-            // Fire off correction in the background if enough time has passed
-            if timeSinceCorrection >= correctionInterval {
-                timeSinceCorrection = 0
-                startCorrectionChunk()
-            }
-
-            // Always run fast chunks (even while correction runs in background)
-            await runFastChunk()
-        }
-    }
-
-    /// Fast chunk: transcribe only new audio since last fast chunk. Streams tokens to pendingText.
-    private func runFastChunk() async {
-        guard let model = model else { return }
-        guard let (audio, endPos) = recorder.getAudio(from: fastChunkEnd) else { return }
-        fastChunkEnd = endPos
-
-        do {
-            for try await event in model.generateStream(
-                audio: audio,
-                maxTokens: maxTokens,
-                temperature: temperature,
-                language: language,
-                chunkDuration: chunkDuration
-            ) {
-                try Task.checkCancellation()
+        // Listen to events from the session
+        eventTask = Task {
+            for await event in session.events {
                 switch event {
-                case .token(let token):
-                    pendingText += token
-                    transcriptionText = confirmedText + pendingText
-                case .info(let info):
-                    tokensPerSecond = info.tokensPerSecond
-                    peakMemory = info.peakMemoryUsage
-                case .result:
+                case .displayUpdate(let confirmed, let provisional):
+                    transcriptionText = confirmed + provisional
+                case .confirmed:
+                    break  // displayUpdate handles the UI
+                case .provisional:
                     break
+                case .stats(let stats):
+                    tokensPerSecond = stats.tokensPerSecond
+                    peakMemory = stats.peakMemoryGB
+                case .ended(let fullText):
+                    transcriptionText = fullText
                 }
             }
-        } catch is CancellationError {
-            Memory.clearCache()
-        } catch {
-            errorMessage = "Transcription failed: \(error.localizedDescription)"
+            // Stream ended naturally — clean up
+            streamingSession = nil
+            eventTask = nil
         }
-    }
 
-    /// Fire-and-forget correction: re-transcribe all audio from confirmedSampleEnd in the background.
-    /// When done, promotes result to confirmedText and resets pending. Skips if already running.
-    private func startCorrectionChunk() {
-        guard correctionTask == nil else { return }
-        guard let model = model else { return }
-        let currentEnd = recorder.sampleCount
-        guard currentEnd > confirmedSampleEnd else { return }
-        guard let (audio, endPos) = recorder.getAudio(from: confirmedSampleEnd) else { return }
-
-        correctionTask = Task {
-            var correctionText = ""
-            do {
-                for try await event in model.generateStream(
-                    audio: audio,
-                    maxTokens: maxTokens,
-                    temperature: temperature,
-                    language: language,
-                    chunkDuration: chunkDuration
-                ) {
-                    try Task.checkCancellation()
-                    switch event {
-                    case .token(let token):
-                        correctionText += token
-                    case .info(let info):
-                        tokensPerSecond = info.tokensPerSecond
-                        peakMemory = info.peakMemoryUsage
-                    case .result:
-                        break
-                    }
+        // Audio feed loop: read new samples every 100ms and feed to session
+        liveTask = Task {
+            while !Task.isCancelled && recorder.isRecording {
+                if let (audio, endPos) = recorder.getAudio(from: lastReadPos) {
+                    lastReadPos = endPos
+                    let samples = audio.asArray(Float.self)
+                    session.feedAudio(samples: samples)
                 }
-            } catch is CancellationError {
-                Memory.clearCache()
-            } catch {
-                errorMessage = "Transcription failed: \(error.localizedDescription)"
+                try? await Task.sleep(for: .milliseconds(100))
             }
-
-            // Replace pending with correction result and promote
-            if !correctionText.isEmpty {
-                confirmedText += correctionText
-                pendingText = ""
-                confirmedSampleEnd = endPos
-                fastChunkEnd = endPos
-                transcriptionText = confirmedText
-            }
-
-            correctionTask = nil
         }
     }
 
     func stopRecording() {
         liveTask?.cancel()
         liveTask = nil
-        correctionTask?.cancel()
-        correctionTask = nil
-
-        // Final correction: transcribe everything since last confirmed position
-        let finalStart = confirmedSampleEnd
-        let hasPending = recorder.sampleCount > finalStart
 
         _ = recorder.stopRecording()
 
-        if hasPending, let (audio, _) = recorder.getAudio(from: finalStart) {
-            generationTask = Task {
-                guard let model = model else { return }
-
-                isGenerating = true
-                generationProgress = "Final transcription..."
-                pendingText = ""
-
-                var finalText = ""
-                do {
-                    for try await event in model.generateStream(
-                        audio: audio,
-                        maxTokens: maxTokens,
-                        temperature: temperature,
-                        language: language,
-                        chunkDuration: chunkDuration
-                    ) {
-                        try Task.checkCancellation()
-                        switch event {
-                        case .token(let token):
-                            finalText += token
-                            pendingText = finalText
-                            transcriptionText = confirmedText + pendingText
-                        case .info(let info):
-                            tokensPerSecond = info.tokensPerSecond
-                            peakMemory = info.peakMemoryUsage
-                        case .result:
-                            break
-                        }
-                    }
-                } catch is CancellationError {
-                    Memory.clearCache()
-                } catch {
-                    errorMessage = "Transcription failed: \(error.localizedDescription)"
-                }
-
-                if !finalText.isEmpty {
-                    confirmedText += finalText
-                    pendingText = ""
-                    transcriptionText = confirmedText
-                }
-
-                generationProgress = ""
-                isGenerating = false
+        // Feed any remaining audio, then stop session
+        if let session = streamingSession {
+            if let (audio, endPos) = recorder.getAudio(from: lastReadPos) {
+                lastReadPos = endPos
+                let samples = audio.asArray(Float.self)
+                session.feedAudio(samples: samples)
             }
-        } else {
-            // Promote any remaining pending text
-            confirmedText += pendingText
-            pendingText = ""
-            transcriptionText = confirmedText
+
+            // Stop promotes all provisional tokens and emits .ended
+            // The eventTask will process .ended and clean up naturally
+            session.stop()
         }
     }
 
     func cancelRecording() {
         liveTask?.cancel()
         liveTask = nil
-        correctionTask?.cancel()
-        correctionTask = nil
+        streamingSession?.cancel()
+        streamingSession = nil
+        eventTask?.cancel()
+        eventTask = nil
         recorder.cancelRecording()
-        confirmedSampleEnd = 0
-        fastChunkEnd = 0
+        lastReadPos = 0
     }
-
 
     func stop() {
         liveTask?.cancel()
         liveTask = nil
-        correctionTask?.cancel()
-        correctionTask = nil
+        streamingSession?.cancel()
+        streamingSession = nil
+        eventTask?.cancel()
+        eventTask = nil
         generationTask?.cancel()
         generationTask = nil
 
         if isRecording {
             recorder.cancelRecording()
-            confirmedSampleEnd = 0
-            fastChunkEnd = 0
+            lastReadPos = 0
         }
 
         if isGenerating {
