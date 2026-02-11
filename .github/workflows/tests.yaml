@@ -11,7 +11,6 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode version
@@ -28,3 +27,7 @@ jobs:
         run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioCodecsTests CODE_SIGNING_ALLOWED=NO
       - name: Test TTS
         run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioTTSTests CODE_SIGNING_ALLOWED=NO
+      - name: Test STT
+        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioSTTTests CODE_SIGNING_ALLOWED=NO
+      - name: Test VAD
+        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:MLXAudioTests/MLXAudioVADTests CODE_SIGNING_ALLOWED=NO
